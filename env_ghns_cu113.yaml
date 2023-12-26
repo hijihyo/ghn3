@@ -1,0 +1,28 @@
+name: ghns_cu113
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - cudatoolkit=11.3
+  - pytorch==1.12.1
+  - torchvision==0.13.1
+  - black
+  - flake8
+  - isort
+  - networkx[version='>=2.4']
+  - pygraphviz
+  - pydot
+  - einops
+  - scipy
+  - tqdm
+  - matplotlib
+  - pillow
+  - scikit-learn
+  - scikit-learn-intelex
+  - h5py
+  - pycocotools
+  - huggingface_hub
+  - joblib
+  - timm
+  - transformers
+  - psutil
