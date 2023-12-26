@@ -35,8 +35,10 @@ Example:
 
 import argparse
 import time
+from copy import deepcopy
 from functools import partial
 
+import wandb
 from ppuda.config import init_config
 from ppuda.vision.loader import image_loader
 
@@ -55,6 +57,22 @@ def main():
         help="train GHN-2, also can use code from" " https://github.com/facebookresearch/ppuda to train GHN-2",
     )
     parser.add_argument("--interm_epoch", type=int, default=5, help="intermediate epochs to keep checkpoints for")
+
+    parser.add_argument("--wandb", action="store_true", default=False, help="Enable logging at Weights & Biases")
+    parser.add_argument("--wandb_project", type=str, default="default", help="The name of a project in Weights & Biases")
+    parser.add_argument(
+        "--wandb_entity", type=str, default="mlai-nngen", help="The name of an entity in Weights & Biases"
+    )
+    parser.add_argument(
+        "--wandb_name", type=str, default=None, help="The name of an experiment in Weights & Biases. Defaults to None"
+    )
+    parser.add_argument(
+        "--wandb_notes",
+        type=str,
+        default=None,
+        help="Short description about the experiment. Recorded in Weights & Biases",
+    )
+
     ghn2 = parser.parse_known_args()[0].ghn2
 
     ddp = setup_ddp()
@@ -67,6 +85,9 @@ def main():
         shape_multiplier=2 if ghn2 else 1,
     )  # max_shape default setting (can be overriden by --max_shape)
 
+    if args.wandb_name is None:
+        args.wandb_name = args.name
+
     if hasattr(args, "multigpu") and args.multigpu:
         raise NotImplementedError(
             "the `multigpu` argument was meant to use nn.DataParallel in the GHN-2 code. "
@@ -75,8 +96,24 @@ def main():
             "Therefore, this repo is not supporting DataParallel anymore as it complicates some steps. "
             "nn.DistributedDataParallel is used if this script is called with torchrun (see examples on top)."
         )
-    is_imagenet = args.dataset.startswith("imagenet")
 
+    use_wandb = args.wandb and ddp.rank == 0
+    if use_wandb:
+        vars_args = vars(deepcopy(args))
+        del vars_args["wandb"]
+        del vars_args["wandb_project"]
+        del vars_args["wandb_entity"]
+        del vars_args["wandb_name"]
+        del vars_args["wandb_notes"]
+        wandb.init(
+            config=vars_args,
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_name,
+            notes=args.wandb_notes,
+        )
+
+    is_imagenet = args.dataset.startswith("imagenet")
     log("loading the %s dataset..." % args.dataset.upper())
     train_queue, _, num_classes = image_loader(
         args.dataset,
@@ -167,7 +204,9 @@ def main():
                 break
 
             trainer.update(images, targets, graphs=next(graphs_queue))
-            trainer.log(step)
+            metrics = trainer.log(step)
+            if metrics is not None and use_wandb:
+                wandb.log(metrics, step + 1)
 
             if args.save:
                 # save GHN checkpoint
@@ -176,6 +215,10 @@ def main():
         trainer.scheduler_step()  # lr scheduler step
 
     log("done at {}!".format(time.strftime("%Y%m%d-%H%M%S")))
+
+    if use_wandb:
+        wandb.finish()
+
     if ddp.ddp:
         clean_ddp()
 

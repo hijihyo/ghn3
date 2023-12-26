@@ -447,3 +447,5 @@ class Trainer:
             if self.amp:
                 metrics["amp_scale"] = self.scaler._check_scale_growth_tracker("update")[0].item()
             self.logger(step_, metrics)
+            return metrics
+        return None
