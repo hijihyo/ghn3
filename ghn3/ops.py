@@ -15,14 +15,20 @@ training GHNs (lightweight modules are used) and training the baseline networks 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from ppuda.deepnets1m.net import (
+    AuxiliaryHeadCIFAR,
+    AuxiliaryHeadImageNet,
+    _is_none,
+    drop_path,
+    named_layered_modules,
+)
+from ppuda.deepnets1m.ops import parse_op_ks
+
 from .graphormer import create_transformer
 from .light_ops import create_light_modules
-from ppuda.deepnets1m.ops import parse_op_ks
-from ppuda.deepnets1m.net import AuxiliaryHeadImageNet, AuxiliaryHeadCIFAR, drop_path, _is_none, named_layered_modules
 
 
 def create_ops(light):
-
     if light:
 
         class ModuleEmpty:
@@ -47,7 +53,7 @@ def create_ops(light):
                 return self._named_modules
 
             def add_module(self, name, module):
-                self.__dict__.get('_modules')[name] = module
+                self.__dict__.get("_modules")[name] = module
 
             def __call__(self, *input, **kwargs):
                 return self.forward(*input, **kwargs)
@@ -64,7 +70,6 @@ def create_ops(light):
                 return
 
             def parameters(self, recurse: bool = True):
-
                 for n, p in self._parameters.items():
                     if p is not None:
                         yield p
@@ -76,7 +81,7 @@ def create_ops(light):
                         if p is not None:
                             yield p
 
-            def named_modules(self, memo=None, prefix: str = '', remove_duplicate: bool = True):
+            def named_modules(self, memo=None, prefix: str = "", remove_duplicate: bool = True):
                 if memo is None:
                     memo = set()
                 if self not in memo:
@@ -86,17 +91,20 @@ def create_ops(light):
                     for name, module in self._modules.items():
                         if not isinstance(module, Module):
                             continue
-                        submodule_prefix = prefix + ('.' if prefix else '') + name
+                        submodule_prefix = prefix + ("." if prefix else "") + name
                         for m in module.named_modules(memo, submodule_prefix, remove_duplicate):
                             yield m
 
             def __setattr__(self, name, value) -> None:
                 if isinstance(value, (nn.Module, ModuleEmpty)):
-                    self.__dict__.get('_modules')[name] = value
-                elif isinstance(value, (torch.Tensor, nn.Parameter)) or \
-                        (name in ['weight', 'bias'] and value is None) or \
-                        isinstance(value, (list, tuple)) and name in ['weight', 'bias']:
-                    self.__dict__.get('_parameters')[name] = value
+                    self.__dict__.get("_modules")[name] = value
+                elif (
+                    isinstance(value, (torch.Tensor, nn.Parameter))
+                    or (name in ["weight", "bias"] and value is None)
+                    or isinstance(value, (list, tuple))
+                    and name in ["weight", "bias"]
+                ):
+                    self.__dict__.get("_parameters")[name] = value
 
                 object.__setattr__(self, name, value)
 
@@ -105,41 +113,56 @@ def create_ops(light):
         #     exec(f'{k} = modules_light[k]')
         # the above is not working for some reason, so have to list all the modules explicitly
 
-        Conv2d = modules_light['Conv2d']
-        Linear = modules_light['Linear']
-        Identity = modules_light['Identity']
-        ReLU = modules_light['ReLU']
-        GELU = modules_light['GELU']
-        Hardswish = modules_light['Hardswish']
-        Sequential = modules_light['Sequential']
-        ModuleList = modules_light['ModuleList']
-        Dropout = modules_light['Dropout']
-        LayerNorm = modules_light['LayerNorm']
-        BatchNorm2d = modules_light['BatchNorm2d']
-        AvgPool2d = modules_light['AvgPool2d']
-        MaxPool2d = modules_light['MaxPool2d']
-        AdaptiveAvgPool2d = modules_light['AdaptiveAvgPool2d']
+        Conv2d = modules_light["Conv2d"]
+        Linear = modules_light["Linear"]
+        Identity = modules_light["Identity"]
+        ReLU = modules_light["ReLU"]
+        GELU = modules_light["GELU"]
+        Hardswish = modules_light["Hardswish"]
+        Sequential = modules_light["Sequential"]
+        ModuleList = modules_light["ModuleList"]
+        Dropout = modules_light["Dropout"]
+        LayerNorm = modules_light["LayerNorm"]
+        BatchNorm2d = modules_light["BatchNorm2d"]
+        AvgPool2d = modules_light["AvgPool2d"]
+        MaxPool2d = modules_light["MaxPool2d"]
+        AdaptiveAvgPool2d = modules_light["AdaptiveAvgPool2d"]
 
     else:
+        from torch.nn.modules import (
+            GELU,
+            AdaptiveAvgPool2d,
+            AvgPool2d,
+            BatchNorm2d,
+            Conv2d,
+            Dropout,
+            Hardswish,
+            Identity,
+            LayerNorm,
+            Linear,
+            MaxPool2d,
+            Module,
+            ModuleList,
+            ReLU,
+            Sequential,
+        )
 
-        from torch.nn.modules import Module, ModuleList, Sequential, Dropout, Identity, Linear, Conv2d, \
-            BatchNorm2d, LayerNorm, AvgPool2d, MaxPool2d, AdaptiveAvgPool2d, ReLU, GELU, Hardswish
         ModuleEmpty = Module
 
     def bn_layer(norm, C):
-        if norm in [None, '', 'none']:
+        if norm in [None, "", "none"]:
             norm_layer = Identity()
-        elif norm.startswith('bn'):
-            norm_layer = BatchNorm2d(C, track_running_stats=norm.find('track') >= 0)
+        elif norm.startswith("bn"):
+            norm_layer = BatchNorm2d(C, track_running_stats=norm.find("track") >= 0)
         else:
             raise NotImplementedError(norm)
         return norm_layer
-
 
     """
     Defining custom layers from https://github.com/facebookresearch/ppuda/blob/main/ppuda/deepnets1m/ops.py.
     But here we inherit them from our Module/ModuleEmpty instead of nn.Module for faster creation of module instances.
     """
+
     class Stride(ModuleEmpty):
         def __init__(self, stride):
             super().__init__()
@@ -148,7 +171,7 @@ def create_ops(light):
         def forward(self, x):
             if self.stride == 1:
                 return x
-            return x[:, :, ::self.stride, ::self.stride]
+            return x[:, :, :: self.stride, :: self.stride]
 
     class Zero(ModuleEmpty):
         def __init__(self, stride):
@@ -157,11 +180,11 @@ def create_ops(light):
 
         def forward(self, x):
             if self.stride == 1:
-                return x.mul(0.)
-            return x[:, :, ::self.stride, ::self.stride].mul(0.)
+                return x.mul(0.0)
+            return x[:, :, :: self.stride, :: self.stride].mul(0.0)
 
     class FactorizedReduce(Module):
-        def __init__(self, C_in, C_out, norm='bn', stride=2):
+        def __init__(self, C_in, C_out, norm="bn", stride=2):
             super().__init__()
             assert C_out % 2 == 0
             self.stride = stride
@@ -177,44 +200,47 @@ def create_ops(light):
             return out
 
     class ReLUConvBN(Module):
-
-        def __init__(self, C_in, C_out, ks=1, stride=1, padding=0, norm='bn', double=False):
+        def __init__(self, C_in, C_out, ks=1, stride=1, padding=0, norm="bn", double=False):
             super().__init__()
             self.stride = stride
             if double:
                 conv = [
                     Conv2d(C_in, C_in, (1, ks), stride=(1, stride), padding=(0, padding), bias=False),
-                    Conv2d(C_in, C_out, (ks, 1), stride=(stride, 1), padding=(padding, 0), bias=False)]
+                    Conv2d(C_in, C_out, (ks, 1), stride=(stride, 1), padding=(padding, 0), bias=False),
+                ]
             else:
                 conv = [Conv2d(C_in, C_out, ks, stride=stride, padding=padding, bias=False)]
-            self.op = Sequential(
-                ReLU(inplace=False),
-                *conv,
-                bn_layer(norm, C_out))
+            self.op = Sequential(ReLU(inplace=False), *conv, bn_layer(norm, C_out))
 
         def forward(self, x):
             return self.op(x)
 
     class DilConv(Module):
-
-        def __init__(self, C_in, C_out, ks, stride, padding, dilation, norm='bn'):
+        def __init__(self, C_in, C_out, ks, stride, padding, dilation, norm="bn"):
             super().__init__()
             self.stride = stride
 
             self.op = Sequential(
                 ReLU(inplace=False),
-                Conv2d(C_in, C_in, kernel_size=ks, stride=stride, padding=padding, dilation=dilation,
-                       groups=C_in, bias=False),
+                Conv2d(
+                    C_in,
+                    C_in,
+                    kernel_size=ks,
+                    stride=stride,
+                    padding=padding,
+                    dilation=dilation,
+                    groups=C_in,
+                    bias=False,
+                ),
                 Conv2d(C_in, C_out, kernel_size=1, padding=0, bias=False),
-                bn_layer(norm, C_out)
+                bn_layer(norm, C_out),
             )
 
         def forward(self, x):
             return self.op(x)
 
     class SepConv(Module):
-
-        def __init__(self, C_in, C_out, ks, stride, padding, norm='bn'):
+        def __init__(self, C_in, C_out, ks, stride, padding, norm="bn"):
             super().__init__()
             self.stride = stride
 
@@ -226,7 +252,7 @@ def create_ops(light):
                 ReLU(inplace=False),
                 Conv2d(C_in, C_in, kernel_size=ks, stride=1, padding=padding, groups=C_in, bias=False),
                 Conv2d(C_in, C_out, kernel_size=1, padding=0, bias=False),
-                bn_layer(norm, C_out)
+                bn_layer(norm, C_out),
             )
 
         def forward(self, x):
@@ -241,7 +267,7 @@ def create_ops(light):
             super().__init__()
 
             if dim_out is not None:
-                assert dim_out == num_channels, (dim_out, num_channels, 'only same dimensionality is supported')
+                assert dim_out == num_channels, (dim_out, num_channels, "only same dimensionality is supported")
             num_channels_reduced = num_channels // reduction_ratio
             self.reduction_ratio = reduction_ratio
             self.stride = stride
@@ -267,7 +293,7 @@ def create_ops(light):
             a, b = squeeze_tensor.size()
             output_tensor = torch.mul(input_tensor, self.sigmoid(fc_out_2).view(a, b, 1, 1))
             if self.stride > 1:
-                output_tensor = output_tensor[:, :, ::self.stride, ::self.stride]
+                output_tensor = output_tensor[:, :, :: self.stride, :: self.stride]
             return output_tensor
 
     transformer_types = create_transformer(Module, Linear, GELU, ReLU, LayerNorm, Dropout, Identity, Sequential)
@@ -284,34 +310,45 @@ def create_ops(light):
             """
             try:
                 return x + self.weight
-            except:
+            except:  # noqa: E722
                 print(x.shape, self.weight.shape)
                 raise
 
     OPS = {
         # i, o, k, s, n = C_in, C_out, ks, stride, norm
-        'none': lambda i, o, k, s, n: Zero(s),
-        'skip_connect': lambda i, o, k, s, n: Identity() if s == 1 else FactorizedReduce(i, o, norm=n),
-        'avg_pool': lambda i, o, k, s, n: AvgPool2d(k, stride=s, padding=k // 2, count_include_pad=False),
-        'max_pool': lambda i, o, k, s, n: MaxPool2d(k, stride=s, padding=k // 2),
-        'conv': lambda i, o, k, s, n: ReLUConvBN(i, o, k, s, k // 2, norm=n),
-        'sep_conv': lambda i, o, k, s, n: SepConv(i, o, k, s, k // 2, norm=n),
-        'dil_conv': lambda i, o, k, s, n: DilConv(i, o, k, s, k - k % 2, 2, norm=n),
-        'conv2': lambda i, o, k, s, n: ReLUConvBN(i, o, k, s, k // 2, norm=n, double=True),
-        'conv_stride': lambda i, o, k, s, n: Conv2d(i, o, k, stride=k, bias=False, padding=int(k < 4)),
-        'msa': lambda i, o, k, s, n: transformer_types['TransformerLayer'](i, stride=s),
-        'cse': lambda i, o, k, s, n: ChannelSELayer(i, dim_out=o, stride=s),
+        "none": lambda i, o, k, s, n: Zero(s),
+        "skip_connect": lambda i, o, k, s, n: Identity() if s == 1 else FactorizedReduce(i, o, norm=n),
+        "avg_pool": lambda i, o, k, s, n: AvgPool2d(k, stride=s, padding=k // 2, count_include_pad=False),
+        "max_pool": lambda i, o, k, s, n: MaxPool2d(k, stride=s, padding=k // 2),
+        "conv": lambda i, o, k, s, n: ReLUConvBN(i, o, k, s, k // 2, norm=n),
+        "sep_conv": lambda i, o, k, s, n: SepConv(i, o, k, s, k // 2, norm=n),
+        "dil_conv": lambda i, o, k, s, n: DilConv(i, o, k, s, k - k % 2, 2, norm=n),
+        "conv2": lambda i, o, k, s, n: ReLUConvBN(i, o, k, s, k // 2, norm=n, double=True),
+        "conv_stride": lambda i, o, k, s, n: Conv2d(i, o, k, stride=k, bias=False, padding=int(k < 4)),
+        "msa": lambda i, o, k, s, n: transformer_types["TransformerLayer"](i, stride=s),
+        "cse": lambda i, o, k, s, n: ChannelSELayer(i, dim_out=o, stride=s),
     }
 
     class Cell(Module):
-
-        def __init__(self, genotype, C_prev_prev, C_prev, C_in, C_out, reduction, reduction_prev,
-                     norm='bn', preproc=True, is_vit=False, cell_ind=0):
+        def __init__(
+            self,
+            genotype,
+            C_prev_prev,
+            C_prev,
+            C_in,
+            C_out,
+            reduction,
+            reduction_prev,
+            norm="bn",
+            preproc=True,
+            is_vit=False,
+            cell_ind=0,
+        ):
             super(Cell, self).__init__()
 
             self._is_vit = is_vit
             self._cell_ind = cell_ind
-            self._has_none = sum([n[0] == 'none' for n in genotype.normal + genotype.reduce]) > 0
+            self._has_none = sum([n[0] == "none" for n in genotype.normal + genotype.reduce]) > 0
             self.genotype = genotype
 
             if preproc:
@@ -350,7 +387,6 @@ def create_ops(light):
             self._indices = indices
 
         def forward(self, s0, s1, drop_path_prob=0):
-
             s0 = None if (s0 is None or _is_none(self.preprocess0)) else self.preprocess0(s0)
             s1 = None if (s1 is None or _is_none(self.preprocess1)) else self.preprocess1(s1)
 
@@ -375,7 +411,7 @@ def create_ops(light):
                         h2 = drop_path(h2, drop_path_prob)
                     try:
                         s = h2 if s is None else (h1 + h2)
-                    except:
+                    except:  # noqa: E722
                         print(h1.shape, h2.shape, self.genotype)
                         raise
 
@@ -401,26 +437,26 @@ def create_ops(light):
             return y
 
     class Network(Module):
-
-        def __init__(self,
-                     C,
-                     num_classes,
-                     genotype,
-                     n_cells,
-                     ks=3,
-                     is_imagenet_input=True,
-                     stem_pool=False,
-                     stem_type=0,
-                     imagenet_stride=4,
-                     is_vit=None,
-                     norm='bn-track',
-                     preproc=True,
-                     C_mult=2,
-                     fc_layers=0,
-                     fc_dim=0,
-                     glob_avg=True,
-                     auxiliary=False,
-                     ):
+        def __init__(
+            self,
+            C,
+            num_classes,
+            genotype,
+            n_cells,
+            ks=3,
+            is_imagenet_input=True,
+            stem_pool=False,
+            stem_type=0,
+            imagenet_stride=4,
+            is_vit=None,
+            norm="bn-track",
+            preproc=True,
+            C_mult=2,
+            fc_layers=0,
+            fc_dim=0,
+            glob_avg=True,
+            auxiliary=False,
+        ):
             super().__init__()
 
             self.genotype = genotype
@@ -429,22 +465,23 @@ def create_ops(light):
             self.drop_path_prob = 0
             self.expected_input_sz = 224 if is_imagenet_input else 32
 
-            self._is_vit = sum(
-                [n[0] == 'msa' for n in genotype.normal + genotype.reduce]) > 0 if is_vit is None else is_vit
+            self._is_vit = (
+                sum([n[0] == "msa" for n in genotype.normal + genotype.reduce]) > 0 if is_vit is None else is_vit
+            )
 
             steps = len(genotype.normal_concat)  # number of inputs to the concatenation operation
             if steps > 1 or C_mult > 1:
-                assert preproc, 'preprocessing layers must be used in this case'
+                assert preproc, "preprocessing layers must be used in this case"
 
             self._stem_type = stem_type
-            assert stem_type in [0, 1], ('either 0 (simple) or 1 (imagenet-style) stem must be chosen', stem_type)
+            assert stem_type in [0, 1], ("either 0 (simple) or 1 (imagenet-style) stem must be chosen", stem_type)
 
             C_prev_prev = C_prev = C_curr = C
 
             # Define the stem
             if self._is_vit:
                 # Visual Transformer stem
-                self.stem0 = OPS['conv_stride'](3, C, 16 if is_imagenet_input else 3, None, None)
+                self.stem0 = OPS["conv_stride"](3, C, 16 if is_imagenet_input else 3, None, None)
                 self.pos_enc = PosEnc(C, 14 if is_imagenet_input else 11)
 
             elif stem_type == 0:
@@ -452,8 +489,9 @@ def create_ops(light):
                 C_stem = int(C * (3 if (preproc and not is_imagenet_input) else 1))
 
                 self.stem = Sequential(
-                    Conv2d(3, C_stem, ks, stride=imagenet_stride if is_imagenet_input else 1, padding=ks // 2,
-                               bias=False),
+                    Conv2d(
+                        3, C_stem, ks, stride=imagenet_stride if is_imagenet_input else 1, padding=ks // 2, bias=False
+                    ),
                     bn_layer(norm, C_stem),
                     MaxPool2d(3, stride=2, padding=1, ceil_mode=False) if stem_pool else Identity(),
                 )
@@ -463,24 +501,23 @@ def create_ops(light):
             else:
                 # ImageNet-style stem
                 self.stem0 = Sequential(
-                    Conv2d(3, C // 2, kernel_size=ks, stride=2 if is_imagenet_input else 1,
-                               padding=ks // 2, bias=False),
+                    Conv2d(3, C // 2, kernel_size=ks, stride=2 if is_imagenet_input else 1, padding=ks // 2, bias=False),
                     bn_layer(norm, C // 2),
                     ReLU(inplace=True),
                     Conv2d(C // 2, C, kernel_size=3, stride=2 if is_imagenet_input else 1, padding=1, bias=False),
-                    bn_layer(norm, C)
+                    bn_layer(norm, C),
                 )
 
                 self.stem1 = Sequential(
-                    ReLU(inplace=True),
-                    Conv2d(C, C, 3, stride=2, padding=1, bias=False),
-                    bn_layer(norm, C)
+                    ReLU(inplace=True), Conv2d(C, C, 3, stride=2, padding=1, bias=False), bn_layer(norm, C)
                 )
 
             self._n_cells = n_cells
             self.cells = ModuleList()
 
-            is_reduction = lambda cell_ind: cell_ind in [n_cells // 3, 2 * n_cells // 3] and cell_ind > 0
+            def is_reduction(cell_ind):
+                return cell_ind in [n_cells // 3, 2 * n_cells // 3] and cell_ind > 0
+
             self._auxiliary_cell_ind = 2 * n_cells // 3
 
             reduction_prev = stem_type == 1
@@ -493,17 +530,19 @@ def create_ops(light):
 
                 reduction_next = is_reduction(cell_ind + 1)
 
-                cell = Cell(genotype,
-                            C_prev_prev,
-                            C_prev,
-                            C_in=C_curr if preproc else C_prev,
-                            C_out=C_curr * (C_mult if reduction_next and steps == 1 and not preproc else 1),
-                            reduction=reduction,
-                            reduction_prev=reduction_prev,
-                            norm=norm,
-                            is_vit=self._is_vit,
-                            preproc=preproc,
-                            cell_ind=cell_ind)
+                cell = Cell(
+                    genotype,
+                    C_prev_prev,
+                    C_prev,
+                    C_in=C_curr if preproc else C_prev,
+                    C_out=C_curr * (C_mult if reduction_next and steps == 1 and not preproc else 1),
+                    reduction=reduction,
+                    reduction_prev=reduction_prev,
+                    norm=norm,
+                    is_vit=self._is_vit,
+                    preproc=preproc,
+                    cell_ind=cell_ind,
+                )
                 self.cells.append(cell)
 
                 reduction_prev = reduction
@@ -513,8 +552,9 @@ def create_ops(light):
                     if is_imagenet_input:
                         self.auxiliary_head = AuxiliaryHeadImageNet(C_prev, num_classes, norm=norm)
                     else:
-                        self.auxiliary_head = AuxiliaryHeadCIFAR(C_prev, num_classes, norm=norm,
-                                                                 pool_sz=2 if (stem_type == 1 or stem_pool) else 5)
+                        self.auxiliary_head = AuxiliaryHeadCIFAR(
+                            C_prev, num_classes, norm=norm, pool_sz=2 if (stem_type == 1 or stem_pool) else 5
+                        )
 
             self._glob_avg = glob_avg
             if glob_avg:
@@ -524,7 +564,7 @@ def create_ops(light):
                     s = 7 if (stem_type == 1 or stem_pool) else 14
                 else:
                     s = 4 if (stem_type == 1 or stem_pool) else 8
-                C_prev *= s ** 2
+                C_prev *= s**2
 
             fc = [Linear(C_prev, fc_dim if fc_layers > 1 else num_classes)]
             for i in range(fc_layers - 1):
@@ -535,10 +575,9 @@ def create_ops(light):
             self.classifier = Sequential(*fc)
 
             if light:
-                self.__dict__['_layered_modules'] = named_layered_modules(self)
+                self.__dict__["_layered_modules"] = named_layered_modules(self)
 
         def forward(self, input):
-
             if self._is_vit:
                 s0 = self.stem0(input)
                 s0 = s1 = self.pos_enc(s0)
@@ -553,15 +592,15 @@ def create_ops(light):
             for cell_ind, cell in enumerate(self.cells):
                 s0, s1 = s1, cell(s0, s1, self.drop_path_prob)
                 if self._auxiliary and cell_ind == self._auxiliary_cell_ind and self.training:
-                    logits_aux = self.auxiliary_head(F.adaptive_avg_pool2d(s1, 8)
-                                                     if self._is_vit and self.expected_input_sz == 32
-                                                     else s1)
+                    logits_aux = self.auxiliary_head(
+                        F.adaptive_avg_pool2d(s1, 8) if self._is_vit and self.expected_input_sz == 32 else s1
+                    )
 
             if s1 is None:
-                raise ValueError('the network has invalid configuration: the output is None')
+                raise ValueError("the network has invalid configuration: the output is None")
 
             out = self.global_pooling(s1) if self._glob_avg else s1
-            autocast = torch.cpu.amp.autocast if str(out.device) == 'cpu' else torch.cuda.amp.autocast
+            autocast = torch.cpu.amp.autocast if str(out.device) == "cpu" else torch.cuda.amp.autocast
             with autocast(enabled=False):
                 out = out.float()
                 logits = self.classifier(out.reshape(out.size(0), -1))
@@ -570,19 +609,19 @@ def create_ops(light):
 
     types = locals()
     types.update(transformer_types)
-    del types['transformer_types'], types['OPS'], types['light'], types['bn_layer']
+    del types["transformer_types"], types["OPS"], types["light"], types["bn_layer"]
     if light:
-        del types['modules_light']
+        del types["modules_light"]
     return types  # return the local types as a dictionary
 
 
 types_light = create_ops(light=True)
 types_torch_nn = create_ops(light=False)
 
-TransformerLayer = types_torch_nn['TransformerLayer']   # used to create GHN-3 in nn.py
-PosEnc = types_torch_nn['PosEnc']
-Network = types_torch_nn['Network']                     # for evaluating GHNs
-NetworkLight = types_light['Network']                   # for training GHNs
+TransformerLayer = types_torch_nn["TransformerLayer"]  # used to create GHN-3 in nn.py
+PosEnc = types_torch_nn["PosEnc"]
+Network = types_torch_nn["Network"]  # for evaluating GHNs
+NetworkLight = types_light["Network"]  # for training GHNs
 
 
 class _InitializeModule:

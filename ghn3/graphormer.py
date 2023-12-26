@@ -12,24 +12,20 @@ Being picklable is required the transformer modules to be re-used during DDP tra
 """
 
 
+import math
+
 import torch
 import torch.nn as nn
-import math
 
 
 def create_transformer(Module, Linear, GELU, ReLU, LayerNorm, Dropout, Identity, Sequential):
-
     class FeedForward(Module):
         """
         Standard MLP applied after each self-attention in Transformer layers.
 
         """
 
-        def __init__(self, in_features,
-                     hidden_features=None,
-                     out_features=None,
-                     act_layer=GELU,
-                     drop=0):
+        def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=GELU, drop=0):
             super().__init__()
 
             out_features = out_features or in_features
@@ -40,7 +36,7 @@ def create_transformer(Module, Linear, GELU, ReLU, LayerNorm, Dropout, Identity,
                 act_layer(),
                 Dropout(drop) if drop > 0 else Identity(),
                 Linear(hidden_features, out_features),
-                Dropout(drop) if drop > 0 else Identity()
+                Dropout(drop) if drop > 0 else Identity(),
             )
 
         def forward(self, x):
@@ -77,12 +73,12 @@ def create_transformer(Module, Linear, GELU, ReLU, LayerNorm, Dropout, Identity,
 
         """
 
-        def __init__(self, dim, edge_dim=0, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
+        def __init__(self, dim, edge_dim=0, num_heads=8, qkv_bias=False, attn_drop=0.0, proj_drop=0.0):
             super().__init__()
 
             self.num_heads = num_heads
             head_dim = dim // num_heads
-            self.scale = head_dim ** -0.5
+            self.scale = head_dim**-0.5
 
             self.dim = dim
             self.edge_dim = edge_dim
@@ -94,9 +90,7 @@ def create_transformer(Module, Linear, GELU, ReLU, LayerNorm, Dropout, Identity,
             if self.edge_dim > 0:
                 # assume 255+2 is the maximum shortest path distance in graphs
                 self.edge_embed = EdgeEmbedding(dim, max_len=257)
-                self.proj_e = Sequential(Linear(edge_dim * dim, dim),
-                                         ReLU(),
-                                         Linear(dim, num_heads))
+                self.proj_e = Sequential(Linear(edge_dim * dim, dim), ReLU(), Linear(dim, num_heads))
 
         def forward(self, x, edges=None, mask=None):
             """
@@ -132,7 +126,7 @@ def create_transformer(Module, Linear, GELU, ReLU, LayerNorm, Dropout, Identity,
             if mask is not None:
                 # Zero-out attention values corresponding to zero-padded edges/nodes
                 # based on https://discuss.pytorch.org/t/apply-mask-softmax/14212/25
-                attn = attn.masked_fill(~mask.unsqueeze(1), -2 ** 15)  # 2**15 to work with amp
+                attn = attn.masked_fill(~mask.unsqueeze(1), -(2**15))  # 2**15 to work with amp
 
             # standard steps of self-attention layers
             attn = attn.softmax(dim=-1)
@@ -159,22 +153,25 @@ def create_transformer(Module, Linear, GELU, ReLU, LayerNorm, Dropout, Identity,
 
         edges is an adjacency matrix with values from 0 to 255. 0 means no edge, while values > 0 are edge distances.
         In a simple case, edges can be a binary matrix indicating which nodes are connected (1) and which are not (0).
-        In GHN-3 we follow GHN-2 and use the shortest path distances (1, 2, 3, ...) between pairs of nodes as edge values.
-        Note that edges are directed (correspond to the forward pass direction), so the edges matrix is upper triangular.
+        In GHN-3 we follow GHN-2 and use the shortest path distances (1, 2, 3, ...) between pairs of nodes as edge
+        values. Note that edges are directed (correspond to the forward pass direction), so the edges matrix is upper
+        triangular.
 
         mask is a binary mask indicating which nodes are valid (1) and which are zero-padded (0).
         """
 
-        def __init__(self,
-                     dim,
-                     edge_dim=0,
-                     num_heads=8,
-                     mlp_ratio=1,
-                     qkv_bias=False,
-                     act_layer=GELU,
-                     eps=1e-5,
-                     return_edges=False,
-                     stride=1):
+        def __init__(
+            self,
+            dim,
+            edge_dim=0,
+            num_heads=8,
+            mlp_ratio=1,
+            qkv_bias=False,
+            act_layer=GELU,
+            eps=1e-5,
+            return_edges=False,
+            stride=1,
+        ):
             """
 
             :param dim: hidden size.
@@ -196,17 +193,11 @@ def create_transformer(Module, Linear, GELU, ReLU, LayerNorm, Dropout, Identity,
                 self.max_degree = 100
                 self.max_input_dist = 1000
             self.ln1 = LayerNorm(dim, eps=eps)
-            self.attn = MultiHeadSelfAttentionEdges(dim,
-                                                    edge_dim=edge_dim,
-                                                    num_heads=num_heads,
-                                                    qkv_bias=qkv_bias)
+            self.attn = MultiHeadSelfAttentionEdges(dim, edge_dim=edge_dim, num_heads=num_heads, qkv_bias=qkv_bias)
             self.ln2 = LayerNorm(dim, eps=eps)
-            self.ff = FeedForward(in_features=dim,
-                                  hidden_features=int(dim * mlp_ratio),
-                                  act_layer=act_layer)
+            self.ff = FeedForward(in_features=dim, hidden_features=int(dim * mlp_ratio), act_layer=act_layer)
 
         def forward(self, x, edges=None, mask=None):
-
             sz = x.shape
             if len(sz) == 2:
                 x = x.unsqueeze(0)
@@ -217,7 +208,6 @@ def create_transformer(Module, Linear, GELU, ReLU, LayerNorm, Dropout, Identity,
             B, N, C = x.shape
 
             if self.edge_dim > 0:
-
                 if edges.dim() == 2:
                     # construct a dense adjacency matrix
                     # if the edges are already of the shape (B, N, N), then do nothing
@@ -243,7 +233,7 @@ def create_transformer(Module, Linear, GELU, ReLU, LayerNorm, Dropout, Identity,
             if len(sz) == 4:
                 x = x.permute(0, 2, 1).view(sz[0], x.shape[2], sz[2], sz[3])  # B,C,H,W
                 if self.stride > 1:
-                    x = x[:, :, ::self.stride, ::self.stride]
+                    x = x[:, :, :: self.stride, :: self.stride]
 
             return (x, edges, mask) if self.return_edges else x
 

@@ -1,3 +1,4 @@
+# flake8: noqa: F401, F403
 # Copyright (c) 2023. Samsung Electronics Co., Ltd. All Rights Reserved.
 # All rights reserved.
 #
@@ -5,9 +6,9 @@
 # LICENSE file in the root directory of this source tree.
 
 
-from .graph import Graph, GraphBatch
-from .utils import *
 from .ddp_utils import *
+from .deepnets1m import DeepNets1MDDP, NetBatchSamplerDDP
+from .graph import Graph, GraphBatch
 from .nn import *
 from .trainer import Trainer
-from .deepnets1m import DeepNets1MDDP, NetBatchSamplerDDP
+from .utils import *

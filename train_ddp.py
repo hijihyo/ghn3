@@ -45,81 +45,84 @@ Example:
 """
 
 
-import torchvision
 import argparse
 import time
 from functools import partial
+
+import torchvision  # noqa: F401
 from ppuda.config import init_config
 from ppuda.utils import capacity
 from ppuda.vision.loader import image_loader
-from ghn3 import log, Trainer, setup_ddp, transforms_imagenet, clean_ddp
+
+from ghn3 import Trainer, clean_ddp, log, setup_ddp, transforms_imagenet
 
 log = partial(log, flush=True)
 
 
 def main():
-    parser = argparse.ArgumentParser(description='ImageNet training')
-    parser.add_argument('-c', '--compile', type=str, default=None, help='use pytorch2.0 compilation for efficiency')
-    parser.add_argument('--label_smooth', type=float, default=0.1, help='label smoothing')
-    parser.add_argument('--bce', action='store_true', help='use BCE loss instead of cross-entropy')
-    parser.add_argument('--timm_aug', action='store_true', help='use timm augmentations (RandAugment, Mixup, Cutmix)')
-    parser.add_argument('--interm_epoch', type=int, default=5, help='intermediate epochs to keep checkpoints for')
+    parser = argparse.ArgumentParser(description="ImageNet training")
+    parser.add_argument("-c", "--compile", type=str, default=None, help="use pytorch2.0 compilation for efficiency")
+    parser.add_argument("--label_smooth", type=float, default=0.1, help="label smoothing")
+    parser.add_argument("--bce", action="store_true", help="use BCE loss instead of cross-entropy")
+    parser.add_argument("--timm_aug", action="store_true", help="use timm augmentations (RandAugment, Mixup, Cutmix)")
+    parser.add_argument("--interm_epoch", type=int, default=5, help="intermediate epochs to keep checkpoints for")
 
     ddp = setup_ddp()
-    args = init_config(mode='train_net', parser=parser, verbose=ddp.rank == 0, debug=0, beta=1e-5)
+    args = init_config(mode="train_net", parser=parser, verbose=ddp.rank == 0, debug=0, beta=1e-5)
     # beta is the amount of noise added to params (if GHN is used for init, otherwise ignored), default: 1e-5
 
-    log('loading the %s dataset...' % args.dataset.upper())
-    train_queue = image_loader(args.dataset,
-                               args.data_dir,
-                               test=not args.val,
-                               load_train_anyway=True,
-                               batch_size=args.batch_size,
-                               num_workers=args.num_workers,
-                               seed=args.seed,
-                               ddp=ddp.ddp,
-                               im_size=args.imsize,
-                               transforms_train_val=transforms_imagenet(im_size=args.imsize, timm_aug=args.timm_aug),
-                               verbose=ddp.rank == 0)[0]
+    log("loading the %s dataset..." % args.dataset.upper())
+    train_queue = image_loader(
+        args.dataset,
+        args.data_dir,
+        test=not args.val,
+        load_train_anyway=True,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        seed=args.seed,
+        ddp=ddp.ddp,
+        im_size=args.imsize,
+        transforms_train_val=transforms_imagenet(im_size=args.imsize, timm_aug=args.timm_aug),
+        verbose=ddp.rank == 0,
+    )[0]
 
-    trainer = Trainer(eval(f'torchvision.models.{args.arch}()'),
-                      opt=args.opt,
-                      opt_args={'lr': args.lr, 'weight_decay': args.wd, 'momentum': args.momentum},
-                      scheduler='mstep' if args.scheduler is None else args.scheduler,
-                      scheduler_args={'milestones': args.lr_steps, 'gamma': args.gamma},
-                      n_batches=len(train_queue),
-                      grad_clip=args.grad_clip,
-                      device=args.device,
-                      log_interval=args.log_interval,
-                      amp=args.amp,                       # automatic mixed precision (default: False)
-                      label_smoothing=args.label_smooth,  # label smoothing (default: 0.1)
-                      save_dir=args.save,
-                      ckpt=args.ckpt,                     # GHN-3 init (default: None/from scratch)
-                      epochs=args.epochs,
-                      verbose=ddp.rank == 0,
-                      bce=args.bce,
-                      mixup=args.timm_aug,
-                      compile_mode=args.compile,          # pytorch2.0 compilation for potential speedup (default: None)
-                      beta=args.beta,
-                      )
+    trainer = Trainer(
+        eval(f"torchvision.models.{args.arch}()"),
+        opt=args.opt,
+        opt_args={"lr": args.lr, "weight_decay": args.wd, "momentum": args.momentum},
+        scheduler="mstep" if args.scheduler is None else args.scheduler,
+        scheduler_args={"milestones": args.lr_steps, "gamma": args.gamma},
+        n_batches=len(train_queue),
+        grad_clip=args.grad_clip,
+        device=args.device,
+        log_interval=args.log_interval,
+        amp=args.amp,  # automatic mixed precision (default: False)
+        label_smoothing=args.label_smooth,  # label smoothing (default: 0.1)
+        save_dir=args.save,
+        ckpt=args.ckpt,  # GHN-3 init (default: None/from scratch)
+        epochs=args.epochs,
+        verbose=ddp.rank == 0,
+        bce=args.bce,
+        mixup=args.timm_aug,
+        compile_mode=args.compile,  # pytorch2.0 compilation for potential speedup (default: None)
+        beta=args.beta,
+    )
 
-    log('\nStarting training {} with {} parameters!'.format(args.arch.upper(), capacity(trainer._model)[1]))
+    log("\nStarting training {} with {} parameters!".format(args.arch.upper(), capacity(trainer._model)[1]))
 
     for epoch in range(trainer.start_epoch, args.epochs):
-
-        log('\nepoch={:03d}/{:03d}, lr={:e}'.format(epoch + 1, args.epochs, trainer.get_lr()))
+        log("\nepoch={:03d}/{:03d}, lr={:e}".format(epoch + 1, args.epochs, trainer.get_lr()))
 
         if ddp.ddp:
             # make sure sample order is different for each epoch and each seed
             if epoch == trainer.start_epoch:
                 train_queue.sampler.seed = args.seed
             train_queue.sampler.set_epoch(epoch)
-            log(f'shuffle {args.dataset} train loader: set seed to {args.seed}, epoch to {epoch}')
+            log(f"shuffle {args.dataset} train loader: set seed to {args.seed}, epoch to {epoch}")
 
         trainer.reset_metrics(epoch)
 
         for step, (images, targets) in enumerate(train_queue, start=trainer.start_step):
-
             if step >= len(train_queue):  # if we resume training from some start_step > 0, then need to break the loop
                 break
 
@@ -127,14 +130,14 @@ def main():
             trainer.log(step)
 
             if args.save:
-                trainer.save(epoch, step, {'args': args}, interm_epoch=args.interm_epoch)  # save model checkpoint
+                trainer.save(epoch, step, {"args": args}, interm_epoch=args.interm_epoch)  # save model checkpoint
 
         trainer.scheduler_step()  # lr scheduler step
 
-    log('done at {}!'.format(time.strftime('%Y%m%d-%H%M%S')))
+    log("done at {}!".format(time.strftime("%Y%m%d-%H%M%S")))
     if ddp.ddp:
         clean_ddp()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

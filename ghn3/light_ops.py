@@ -12,19 +12,19 @@ Being picklable is required for distributed training the GHN.
 """
 
 
-import torch
-import torch.nn.functional as F
 import numbers
 import operator
 from collections import OrderedDict
-from typing import Union, Optional
-from torch.nn.modules.conv import _pair
-from torch.nn.common_types import _size_2_t
 from itertools import chain, islice
+from typing import Optional, Union
+
+import torch
+import torch.nn.functional as F
+from torch.nn.common_types import _size_2_t
+from torch.nn.modules.conv import _pair
 
 
 def create_light_modules(ModuleEmpty, ModuleLight):
-
     class Sequential(ModuleLight):
         def __init__(self, *args):
             super().__init__()
@@ -52,7 +52,7 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             size = len(self)
             idx = operator.index(idx)
             if not -size <= idx < size:
-                raise IndexError('index {} is out of range'.format(idx))
+                raise IndexError("index {} is out of range".format(idx))
             idx %= size
             return next(islice(iterator, idx, None))
 
@@ -72,7 +72,6 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             return self
 
     class ModuleList(ModuleLight):
-
         def __init__(self, modules=None) -> None:
             super().__init__()
             if modules is not None:
@@ -82,7 +81,7 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             """Get the absolute index for the list of modules"""
             idx = operator.index(idx)
             if not (-len(self) <= idx < len(self)):
-                raise IndexError('index {} is out of range'.format(idx))
+                raise IndexError("index {} is out of range".format(idx))
             if idx < 0:
                 idx += len(self)
             return str(idx)
@@ -124,10 +123,15 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             return self
 
     class AvgPool2d(ModuleEmpty):
-
-        def __init__(self, kernel_size: _size_2_t, stride: Optional[_size_2_t] = None, padding: _size_2_t = 0,
-                     ceil_mode: bool = False, count_include_pad: bool = True,
-                     divisor_override: Optional[int] = None) -> None:
+        def __init__(
+            self,
+            kernel_size: _size_2_t,
+            stride: Optional[_size_2_t] = None,
+            padding: _size_2_t = 0,
+            ceil_mode: bool = False,
+            count_include_pad: bool = True,
+            divisor_override: Optional[int] = None,
+        ) -> None:
             super().__init__()
             self.kernel_size = kernel_size
             self.stride = stride if (stride is not None) else kernel_size
@@ -137,15 +141,27 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             self.divisor_override = divisor_override
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            y = F.avg_pool2d(input, self.kernel_size, self.stride,
-                             self.padding, self.ceil_mode, self.count_include_pad, self.divisor_override)
+            y = F.avg_pool2d(
+                input,
+                self.kernel_size,
+                self.stride,
+                self.padding,
+                self.ceil_mode,
+                self.count_include_pad,
+                self.divisor_override,
+            )
             return y
 
     class MaxPool2d(ModuleEmpty):
-
-        def __init__(self, kernel_size: _size_2_t, stride: Optional[_size_2_t] = None,
-                     padding: _size_2_t = 0, dilation: _size_2_t = 1,
-                     return_indices: bool = False, ceil_mode: bool = False) -> None:
+        def __init__(
+            self,
+            kernel_size: _size_2_t,
+            stride: Optional[_size_2_t] = None,
+            padding: _size_2_t = 0,
+            dilation: _size_2_t = 1,
+            return_indices: bool = False,
+            ceil_mode: bool = False,
+        ) -> None:
             super().__init__()
             self.kernel_size = kernel_size
             self.stride = stride if (stride is not None) else kernel_size
@@ -155,12 +171,17 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             self.ceil_mode = ceil_mode
 
         def forward(self, input: torch.Tensor):
-            return F.max_pool2d(input, self.kernel_size, self.stride,
-                                self.padding, self.dilation, ceil_mode=self.ceil_mode,
-                                return_indices=self.return_indices)
+            return F.max_pool2d(
+                input,
+                self.kernel_size,
+                self.stride,
+                self.padding,
+                self.dilation,
+                ceil_mode=self.ceil_mode,
+                return_indices=self.return_indices,
+            )
 
     class AdaptiveAvgPool2d(ModuleEmpty):
-
         def __init__(self, output_size: _size_2_t) -> None:
             super().__init__()
             self.output_size = output_size
@@ -169,7 +190,6 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             return F.adaptive_avg_pool2d(input, self.output_size)
 
     class ReLU(ModuleEmpty):
-
         def __init__(self, inplace: bool = False):
             super().__init__()
             self.inplace = inplace
@@ -178,7 +198,7 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             return F.relu(input, inplace=self.inplace)
 
     class GELU(ModuleEmpty):
-        def __init__(self, approximate: str = 'none') -> None:
+        def __init__(self, approximate: str = "none") -> None:
             super().__init__()
             self.approximate = approximate
 
@@ -186,7 +206,6 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             return F.gelu(input, approximate=self.approximate)
 
     class Hardswish(ModuleEmpty):
-
         def __init__(self, inplace: bool = False) -> None:
             super().__init__()
             self.inplace = inplace
@@ -199,7 +218,6 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             return input
 
     class Dropout(ModuleEmpty):
-
         def __init__(self, p: float = 0.5, inplace: bool = False) -> None:
             super().__init__()
             self.p = p
@@ -209,19 +227,20 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             return F.dropout(input, self.p, self.training, self.inplace)
 
     class Conv2d(ModuleLight):
-
-        def __init__(self, in_channels: int,
-                     out_channels: int,
-                     kernel_size: _size_2_t,
-                     stride: _size_2_t = 1,
-                     padding: Union[str, _size_2_t] = 0,
-                     dilation: _size_2_t = 1,
-                     groups: int = 1,
-                     bias: bool = True,
-                     padding_mode: str = 'zeros',  # TODO: refine this type
-                     device=None,
-                     dtype=torch.bool):
-
+        def __init__(
+            self,
+            in_channels: int,
+            out_channels: int,
+            kernel_size: _size_2_t,
+            stride: _size_2_t = 1,
+            padding: Union[str, _size_2_t] = 0,
+            dilation: _size_2_t = 1,
+            groups: int = 1,
+            bias: bool = True,
+            padding_mode: str = "zeros",  # TODO: refine this type
+            device=None,
+            dtype=torch.bool,
+        ):
             super().__init__()
 
             self._parameters = OrderedDict()
@@ -240,13 +259,10 @@ def create_light_modules(ModuleEmpty, ModuleLight):
                 self.bias = None
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return F.conv2d(input, self.weight, self.bias, self.stride,
-                            self.padding, self.dilation, self.groups)
+            return F.conv2d(input, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
 
     class Linear(ModuleLight):
-
-        def __init__(self, in_features: int, out_features: int, bias: bool = True,
-                     device=None, dtype=torch.bool):
+        def __init__(self, in_features: int, out_features: int, bias: bool = True, device=None, dtype=torch.bool):
             super().__init__()
 
             self.in_features = in_features
@@ -262,15 +278,9 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             return F.linear(input, self.weight, self.bias)
 
     class BatchNorm2d(ModuleLight):
-
-        def __init__(self, num_features,
-                     eps=1e-5,
-                     momentum=0.1,
-                     affine=True,
-                     track_running_stats=False,
-                     device=None,
-                     dtype=None
-                     ):
+        def __init__(
+            self, num_features, eps=1e-5, momentum=0.1, affine=True, track_running_stats=False, device=None, dtype=None
+        ):
             super().__init__()
             self.num_features = num_features
             self.eps = eps
@@ -278,7 +288,7 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             self.affine = affine
             self.track_running_stats = track_running_stats
 
-            assert affine and not track_running_stats, 'assumed affine and that running stats is not updated'
+            assert affine and not track_running_stats, "assumed affine and that running stats is not updated"
             self.running_mean = None
             self.running_var = None
             self.num_batches_tracked = None
@@ -287,7 +297,6 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             self.bias = [num_features]
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-
             if self.momentum is None:
                 exponential_average_factor = 0.0
             else:
@@ -300,9 +309,7 @@ def create_light_modules(ModuleEmpty, ModuleLight):
 
             return F.batch_norm(
                 input,
-                self.running_mean
-                if not self.training or self.track_running_stats
-                else None,
+                self.running_mean if not self.training or self.track_running_stats else None,
                 self.running_var if not self.training or self.track_running_stats else None,
                 self.weight,
                 self.bias,
@@ -312,9 +319,9 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             )
 
     class LayerNorm(ModuleLight):
-
-        def __init__(self, normalized_shape: int, eps: float = 1e-5, elementwise_affine: bool = True,
-                     device=None, dtype=None) -> None:
+        def __init__(
+            self, normalized_shape: int, eps: float = 1e-5, elementwise_affine: bool = True, device=None, dtype=None
+        ) -> None:
             super().__init__()
 
             if isinstance(normalized_shape, numbers.Integral):
@@ -328,10 +335,9 @@ def create_light_modules(ModuleEmpty, ModuleLight):
             self.bias = list(normalized_shape)
 
         def forward(self, input: torch.Tensor) -> torch.Tensor:
-            return F.layer_norm(
-                input, self.normalized_shape, self.weight, self.bias, self.eps)
+            return F.layer_norm(input, self.normalized_shape, self.weight, self.bias, self.eps)
 
     types = locals()
-    types.pop('ModuleEmpty')
-    types.pop('ModuleLight')
+    types.pop("ModuleEmpty")
+    types.pop("ModuleLight")
     return types
