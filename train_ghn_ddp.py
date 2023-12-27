@@ -38,10 +38,10 @@ import time
 from copy import deepcopy
 from functools import partial
 
-import wandb
 from ppuda.config import init_config
 from ppuda.vision.loader import image_loader
 
+import wandb
 from ghn3 import GHN3, DeepNets1MDDP, Trainer, clean_ddp, log, setup_ddp
 
 log = partial(log, flush=True)
@@ -206,7 +206,8 @@ def main():
             trainer.update(images, targets, graphs=next(graphs_queue))
             metrics = trainer.log(step)
             if metrics is not None and use_wandb:
-                wandb.log(metrics, step + 1)
+                _step = epoch * len(train_queue) + step + 1
+                wandb.log(metrics, _step)
 
             if args.save:
                 # save GHN checkpoint
