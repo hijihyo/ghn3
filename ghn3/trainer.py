@@ -21,11 +21,11 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from ppuda.ghn.nn import GHN
-from ppuda.utils import AvgrageMeter, accuracy, capacity, init
+from ppuda.utils import accuracy, capacity, init
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, MultiStepLR, StepLR
 
-from .ddp_utils import avg_ddp_metric, get_ddp_rank, is_ddp
+from .ddp_utils import get_ddp_rank, is_ddp
 from .nn import from_pretrained
 from .ops import Network
 from .utils import Logger, log, print_grads
@@ -41,6 +41,41 @@ except Exception as e:
 
 log = partial(log, flush=True)
 process = psutil.Process(os.getpid())
+
+
+class DDPAverageMeter:
+    def __init__(self, is_ddp, rank):
+        self.is_ddp = is_ddp
+        self.rank = rank
+        self.reset()
+
+    def reset(self):
+        self.sum = torch.zeros(1, dtype=torch.float)
+        self.count = torch.zeros(1, dtype=torch.long)
+        self.average = torch.zeros(1, dtype=torch.float)
+
+    def update(self, value, count=1):
+        self.sum += value * count
+        self.count += count
+        self.average = self.sum.div(self.count) if torch.is_nonzero(self.count) else torch.zeros_like(self.sum)
+
+    def get_synced(self):
+        average = self.average
+        if self.is_ddp:
+            world_size = dist.get_world_size()
+            self_sum = self.sum.to(self.rank)
+            self_sums = [torch.empty_like(self_sum) for _ in range(world_size)]
+            dist.all_gather(self_sums, self_sum)
+
+            self_count = self.count.to(self.rank)
+            self_counts = [torch.empty_like(self_count) for _ in range(world_size)]
+            dist.all_gather(self_counts, self_count)
+
+            self_sums = torch.cat(self_sums).sum()
+            self_counts = torch.cat(self_counts).sum()
+            average = self_sums.div(self_counts) if torch.is_nonzero(self_counts) else torch.zeros_like(self_sums)
+            del self_sum, self_sums, self_count, self_counts
+        return average
 
 
 class Trainer:
@@ -157,9 +192,13 @@ class Trainer:
         self._step = 0
         if epoch > self.start_epoch:
             self.start_step = 0
-        self.metrics = {"loss": AvgrageMeter(), "top1": AvgrageMeter(), "top5": AvgrageMeter()}
+        self.metrics = dict(
+            loss=DDPAverageMeter(self.ddp, self.rank),
+            top1=DDPAverageMeter(self.ddp, self.rank),
+            top5=DDPAverageMeter(self.ddp, self.rank),
+        )
         if self.predparam_wd > 0:
-            self.metrics["loss_predwd"] = AvgrageMeter()  # predicted parameter regularization loss
+            self.metrics["loss_predwd"] = DDPAverageMeter(self.ddp, self.rank)
         self.logger = Logger(self.n_batches, start_step=self.start_step)
 
     def _reset(self, opt, opt_args, scheduler, scheduler_args, state_dict):
@@ -242,33 +281,29 @@ class Trainer:
         self._scheduler.step()
 
     def update(self, images, targets, graphs=None):
-        def loss_check(loss_):
+        def check_loss(loss):
+            nanloss_exists = False
             if self.ddp:
-                loss_avg_ = avg_ddp_metric(loss_)
-                if torch.isnan(loss_avg_):
-                    msg = (
-                        f"rank {self.rank}, step {self._step}, the loss is {loss_}. "
-                        f"Skip this batch, because the avg loss is {loss_avg_}."
-                    )
-                    if self.verbose:
-                        print(msg)
-                    return msg
-                else:
-                    return loss_avg_
-            elif torch.isnan(loss_):
-                msg = (
-                    f"the loss is {loss_}, unable to proceed. "
-                    f"This issue may be fixed by restarting the script and loading the saved checkpoint "
-                    f"using the --ckpt argument."
-                )
-                raise RuntimeError(msg)
+                losses = [torch.empty_like(loss) for _ in range(dist.get_world_size())]
+                dist.all_gather(losses, loss)
+                nanloss_exists = any(torch.isnan(_loss) for _loss in losses)
+            else:
+                nanloss_exists = torch.isnan(loss)
 
-            return
+            if nanloss_exists:
+                if self.ddp:
+                    raise RuntimeError(
+                        f"Nan loss occurred at rank {self.rank}. Unable to proceed since the loss is nan. You may "
+                        "restart the same script with the saved checkpoint through --ckpt argument."
+                    )
+                else:
+                    raise RuntimeError(
+                        "Unable to proceed since the loss is nan. You may restart the same script with the saved "
+                        "checkpoint through --ckpt argument."
+                    )
 
         logits = []
-        loss = 0
-        loss_predwd = None
-        nan_loss = torch.tensor(torch.nan, device=self.rank)
+        loss, loss_predwd = 0, None
 
         self._optimizer.zero_grad()
         if not self._model.training:
@@ -277,43 +312,30 @@ class Trainer:
         try:
             with torch.cuda.amp.autocast(enabled=self.amp):
                 if self._is_ghn:
-                    # Predict parameters
                     if hasattr(graphs, "nets") and len(graphs.nets) > 0:
                         models = graphs.nets
                     else:
-                        # these are heavyweight Network objects that are less efficient but good for debugging
-                        models = []
-                        for nets_args in graphs.net_args:
-                            # only for debugging (set is_imagenet_input and num_classes if needed)
-                            models.append(Network(**nets_args))
+                        models = [Network(**net_args) for net_args in graphs.net_args]
 
-                    models = self._model(
-                        models,
-                        graphs.to_device(self.device),
-                        bn_track_running_stats=True,
-                        keep_grads=True,
-                        reduce_graph=True,
-                    )
+                    kwargs = dict(bn_track_running_stats=True, keep_grads=True, reduce_graph=True)
+                    models = self._model(models, graphs.to_device(self.device), **kwargs)
+
                     if self.predparam_wd > 0:
-                        total_norm = 0
-                        for m in models:
-                            for p in m.parameters():
-                                total_norm += self.param_decay(p)
-
+                        total_norm = []
+                        for model in models:
+                            total_norm.append(sum(self.param_decay(param) for param in model.parameters()))
+                        total_norm = sum(total_norm) / len(total_norm)
                         loss_predwd = self.predparam_wd * total_norm
                 else:
                     models = self._model
 
-                targets = targets.to(self.rank, non_blocking=True)  # loss will be computed on the main device
-                targets_one_hot = targets
                 images = images.to(self.rank, non_blocking=True)
-
+                targets = targets.to(self.rank, non_blocking=True)
                 if self.mixup_fn is not None:
                     images, targets = self.mixup_fn(images, targets)
 
                 if not isinstance(models, (list, tuple)):
                     models = [models]
-
                 for model in models:
                     try:
                         out = model(images)
@@ -324,39 +346,26 @@ class Trainer:
                     loss += self.criterion(y, targets)
                     if self.auxiliary:
                         loss += self.auxiliary_weight * self.criterion(out[1], targets)
-
                     logits.append(y.detach())
+                logits = torch.stack(logits)
 
-                # Concatenate logits across models
-                logits = torch.stack(logits)  # num models x batch size x num classes
-
+            loss /= len(models)
             if loss_predwd is not None:
                 loss += loss_predwd
-
-            loss = loss / len(logits)  # mean loss across models
-            loss_avg = loss_check(loss)
+            check_loss(loss)
 
             if self._step == 0 and self.ddp:
                 if graphs is None:
-                    net_idx = 0
-                    n_graphs = 0
+                    net_idx, n_graphs = 0, 0
                 else:
-                    net_idx = graphs[0].net_idx
-                    n_graphs = len(graphs)
+                    net_idx, n_graphs = graphs[0].net_idx, len(graphs)
                 print(
-                    f"DDP: step {self._step}, rank {self.rank}, {n_graphs} graphs, "
-                    f"net_idx {net_idx}, loss {loss}, loss_avg {loss_avg}, logits {logits.shape}"
+                    f"DDP rank {self.rank} (step={self._step}): {n_graphs} graphs, net_idx {net_idx}, loss {loss}, "
+                    f"logits shape {logits.shape}"
                 )
 
-            if isinstance(loss_avg, str):  # nan loss in any worker -> exit
-                return loss_avg
-
             if self.amp:
-                # Scales the loss, and calls backward()
-                # to create scaled gradients
                 self.scaler.scale(loss).backward()
-
-                # Unscales the gradients of optimizer's assigned params in-place
                 self.scaler.unscale_(self._optimizer)
             else:
                 loss.backward()
@@ -365,59 +374,50 @@ class Trainer:
                 print_grads(self._model)
 
             if self.grad_clip > 0:
-                parameters = []
+                params = []
                 for group in self._optimizer.param_groups:
-                    parameters.extend(group["params"])
-                total_norm_clip = nn.utils.clip_grad_norm_(parameters, self.grad_clip)
+                    params.extend(group["params"])
+                total_norm_clip = nn.utils.clip_grad_norm_(params, self.grad_clip)
             else:
                 total_norm_clip = torch.zeros(1, device=self.rank)
 
             if self.amp:
-                # Unscales gradients and calls
-                # or skips optimizer.step()
                 retval = self.scaler.step(self._optimizer)
-
                 if retval is None and torch.logical_or(total_norm_clip.isnan(), total_norm_clip.isinf()):
                     self.skipped_updates += 1
-
-                # Updates the scale for next iteration
                 self.scaler.update()
-
                 if self.amp_min_scale is not None:
-                    # if the scale is too small then training is hindered, so we manually keep the scale large enough
                     scale = self.scaler._check_scale_growth_tracker("update")[0]
                     if scale < self.amp_min_scale:
                         self.scaler._scale = torch.tensor(self.amp_min_scale).to(scale)
             else:
                 self._optimizer.step()
 
-            targets = targets_one_hot.view(1, -1).expand(len(logits), -1).reshape(-1)
+            targets = targets.view(1, -1).expand(len(logits), -1).reshape(-1)
             logits = logits.reshape(-1, logits.shape[-1])
+            top1, top5 = accuracy(logits, targets, topk=(1, 5))
 
-            # Update training metrics
-            prec1, prec5 = accuracy(logits, targets, topk=(1, 5))
-            n = len(targets)
-            self.metrics["loss"].update((loss_avg if self.ddp else loss).item(), n)
+            num_samples = len(targets)
+            self.metrics["loss"].update(loss.cpu(), num_samples)
+            self.metrics["top1"].update(top1.cpu(), num_samples)
+            self.metrics["top5"].update(top5.cpu(), num_samples)
             if loss_predwd is not None:
-                self.metrics["loss_predwd"].update((avg_ddp_metric(loss_predwd) if self.ddp else loss_predwd).item(), n)
-            self.metrics["top1"].update((avg_ddp_metric(prec1) if self.ddp else prec1).item(), n)
-            self.metrics["top5"].update((avg_ddp_metric(prec5) if self.ddp else prec5).item(), n)
+                self.metrics["loss_predwd"].update(loss_predwd.cpu(), num_samples)
 
             self._step += 1
 
-        except RuntimeError as err:
-            print("error", "rank ", self.rank, type(err), err, graphs.net_args if graphs is not None else "")
-            loss = nan_loss
-
+        except RuntimeError as error:
+            loss = torch.tensor(torch.nan, device=self.rank)
+            print(
+                f"Error occurred at rank {self.rank}: {type(error)} {error}",
+                graphs.net_args if graphs is not None else "",
+            )
             print(traceback.format_exc())
             print(traceback.print_exc())
             if not self.ddp:
                 raise
 
-        loss_avg = loss_check(loss)
-        if isinstance(loss_avg, str):  # oom in any worker -> exit
-            raise RuntimeError(loss_avg)
-
+        check_loss(loss)
         return self.metrics
 
     def save(self, epoch, step, config, save_freq=300, interm_epoch=5):
@@ -443,7 +443,9 @@ class Trainer:
     def log(self, step=None):
         step_ = self._step if step is None else (step + 1)
         if step_ % self.log_interval == 0 or step_ >= self.n_batches - 1 or step_ == 1:
-            metrics = {metric: value.avg for metric, value in self.metrics.items()}
+            metrics = dict()
+            for key in self.metrics.keys():
+                metrics[key] = self.metrics[key].get_synced().item()
             if self.amp:
                 metrics["amp_scale"] = self.scaler._check_scale_growth_tracker("update")[0].item()
             self.logger(step_, metrics)
