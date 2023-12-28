@@ -34,17 +34,85 @@ Example:
 
 
 import argparse
+import os
 import time
 from copy import deepcopy
 from functools import partial
 
+import torch
 from ppuda.config import init_config
-from ppuda.vision.loader import image_loader
+from ppuda.vision.imagenet import ImageNetDataset
+from ppuda.vision.transforms import transforms_cifar as get_cifar_transforms
+from ppuda.vision.transforms import transforms_imagenet as get_imagenet_transforms
+from torch import distributed as dist
+from torch.utils.data import DataLoader
+from torchvision.datasets import CIFAR10
 
 import wandb
 from ghn3 import GHN3, DeepNets1MDDP, Trainer, clean_ddp, log, setup_ddp
 
 log = partial(log, flush=True)
+
+
+def get_train_image_dataloader(
+    dataset,
+    data_dir,
+    batch_size,
+    train_eval_transforms=None,
+    add_eval_noise=False,
+    image_size=32,
+    use_cutout=False,
+    cutout_length=16,
+    num_workers=0,
+    generator=None,
+    verbose=True,
+):
+    lower_dataset = dataset.lower()
+    assert lower_dataset in ["imagenet", "cifar10"]
+    if lower_dataset == "imagenet":
+        if train_eval_transforms is None:
+            train_eval_transforms = get_imagenet_transforms(noise=add_eval_noise, im_size=image_size)
+        train_transform, _ = train_eval_transforms
+
+        dataset_dir = os.path.join(data_dir, "imagenet")
+        train_dataset = ImageNetDataset(dataset_dir, split="train", transform=train_transform, has_validation=True)
+        num_classes = len(train_dataset.classes)
+    else:  # lower_dataset == "cifar10"
+        if train_eval_transforms is None:
+            train_eval_transforms = get_cifar_transforms(
+                noise=add_eval_noise, sz=image_size, cutout=use_cutout, cutout_length=cutout_length
+            )
+        train_transform, _ = train_eval_transforms
+
+        train_dataset = CIFAR10(data_dir, train=True, download=True, transform=train_transform)
+        num_all = len(train_dataset.targets)
+        num_valid = num_all // 10
+        train_indices, _ = torch.split(torch.arange(num_all), (num_all - num_valid, num_valid))
+        train_dataset.data = train_dataset.data[train_indices]
+        train_dataset.targets = [train_dataset.targets[i] for i in train_indices]
+
+        train_dataset.checksum = train_dataset.data.mean()
+        train_dataset.num_examples = len(train_dataset.targets)
+        num_classes = len(torch.unique(torch.tensor(train_dataset.targets)))
+
+    if verbose:
+        print(
+            f"Loaded {dataset} dataset (num_classes={num_classes}, num_examples={train_dataset.num_examples}, "
+            f"checksum={train_dataset.checksum})"
+        )
+    train_dataloader = DataLoader(
+        train_dataset, batch_size, shuffle=True, generator=generator, pin_memory=True, num_workers=num_workers
+    )
+    return train_dataloader, num_classes
+
+
+def is_synchronized(tensor, world_size, rank):
+    tensor = tensor.to(rank)
+    tensors = [torch.empty_like(tensor) for _ in range(world_size)]
+    dist.all_gather(tensors, tensor)
+    _is_synchronized = all(torch.allclose(tensors[i], tensors[i + 1]) for i in range(world_size - 1))
+    del tensors
+    return _is_synchronized
 
 
 def main():
@@ -115,15 +183,15 @@ def main():
 
     is_imagenet = args.dataset.startswith("imagenet")
     log("loading the %s dataset..." % args.dataset.upper())
-    train_queue, _, num_classes = image_loader(
+    generator = torch.Generator().manual_seed(42)
+    train_queue, num_classes = get_train_image_dataloader(
         args.dataset,
         args.data_dir,
-        im_size=args.imsize,
-        test=False,
-        batch_size=args.batch_size,
+        args.batch_size,
+        image_size=args.imsize,
         num_workers=args.num_workers,
-        seed=args.seed,
-        verbose=ddp.rank == 0,
+        generator=generator,
+        verbose=(ddp.rank == 0),
     )
 
     hid = args.hid
@@ -202,6 +270,16 @@ def main():
         for step, (images, targets) in enumerate(train_queue, start=trainer.start_step):
             if step >= len(train_queue):  # if we resume training from some start_step > 0, then need to break the loop
                 break
+
+            if ddp.ddp and step % 100 == 0:
+                if is_synchronized(images, ddp.world_size, ddp.rank) and is_synchronized(
+                    targets, ddp.world_size, ddp.rank
+                ):
+                    log(f"DDP: Training batches are being synchronized (step={step}, world_size={ddp.world_size})")
+                else:
+                    raise RuntimeError(
+                        f"DDP: Training batches are not synchronized (step={step}, world_size={ddp.world_size})"
+                    )
 
             trainer.update(images, targets, graphs=next(graphs_queue))
             metrics = trainer.log(step)
