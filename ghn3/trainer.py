@@ -12,7 +12,6 @@ Helper to train models.
 
 import math
 import os
-import traceback
 from functools import partial
 
 import numpy as np
@@ -281,26 +280,13 @@ class Trainer:
         self._scheduler.step()
 
     def update(self, images, targets, graphs=None):
-        def check_loss(loss):
-            nanloss_exists = False
+        def ddp_aggregate(value):
             if self.ddp:
-                losses = [torch.empty_like(loss) for _ in range(dist.get_world_size())]
-                dist.all_gather(losses, loss)
-                nanloss_exists = any(torch.isnan(_loss) for _loss in losses)
+                values = [torch.empty_like(value) for _ in range(dist.get_world_size())]
+                dist.all_gather(values, value)
+                return values
             else:
-                nanloss_exists = torch.isnan(loss)
-
-            if nanloss_exists:
-                if self.ddp:
-                    raise RuntimeError(
-                        f"Nan loss occurred at rank {self.rank}. Unable to proceed since the loss is nan. You may "
-                        "restart the same script with the saved checkpoint through --ckpt argument."
-                    )
-                else:
-                    raise RuntimeError(
-                        "Unable to proceed since the loss is nan. You may restart the same script with the saved "
-                        "checkpoint through --ckpt argument."
-                    )
+                return [value]
 
         logits = []
         loss, loss_predwd = 0, None
@@ -309,50 +295,60 @@ class Trainer:
         if not self._model.training:
             self._model.train()
 
-        try:
-            with torch.cuda.amp.autocast(enabled=self.amp):
-                if self._is_ghn:
-                    if hasattr(graphs, "nets") and len(graphs.nets) > 0:
-                        models = graphs.nets
-                    else:
-                        models = [Network(**net_args) for net_args in graphs.net_args]
-
-                    kwargs = dict(bn_track_running_stats=True, keep_grads=True, reduce_graph=True)
-                    models = self._model(models, graphs.to_device(self.device), **kwargs)
-
-                    if self.predparam_wd > 0:
-                        total_norm = []
-                        for model in models:
-                            total_norm.append(sum(self.param_decay(param) for param in model.parameters()))
-                        total_norm = sum(total_norm) / len(total_norm)
-                        loss_predwd = self.predparam_wd * total_norm
+        with torch.cuda.amp.autocast(enabled=self.amp):
+            if self._is_ghn:
+                if hasattr(graphs, "nets") and len(graphs.nets) > 0:
+                    models = graphs.nets
                 else:
-                    models = self._model
+                    models = [Network(**net_args) for net_args in graphs.net_args]
 
-                images = images.to(self.rank, non_blocking=True)
-                targets = targets.to(self.rank, non_blocking=True)
-                if self.mixup_fn is not None:
-                    images, targets = self.mixup_fn(images, targets)
+                kwargs = dict(bn_track_running_stats=True, keep_grads=True, reduce_graph=True)
+                models = self._model(models, graphs.to_device(self.device), **kwargs)
 
-                if not isinstance(models, (list, tuple)):
-                    models = [models]
-                for model in models:
-                    try:
-                        out = model(images)
-                    except:  # noqa: E722
-                        print(model)
-                        raise
-                    y = out[0] if isinstance(out, tuple) else out
-                    loss += self.criterion(y, targets)
-                    if self.auxiliary:
-                        loss += self.auxiliary_weight * self.criterion(out[1], targets)
-                    logits.append(y.detach())
-                logits = torch.stack(logits)
+                if self.predparam_wd > 0:
+                    total_norm = []
+                    for model in models:
+                        total_norm.append(sum(self.param_decay(param) for param in model.parameters()))
+                    total_norm = sum(total_norm) / len(total_norm)
+                    loss_predwd = self.predparam_wd * total_norm
+            else:
+                models = self._model
+
+            images = images.to(self.rank, non_blocking=True)
+            targets = targets.to(self.rank, non_blocking=True)
+            if self.mixup_fn is not None:
+                images, targets = self.mixup_fn(images, targets)
+
+            if not isinstance(models, (list, tuple)):
+                models = [models]
+            for model in models:
+                try:
+                    out = model(images)
+                except:  # noqa: E722
+                    print(model)
+                    raise
+                y = out[0] if isinstance(out, tuple) else out
+                loss += self.criterion(y, targets)
+                if self.auxiliary:
+                    loss += self.auxiliary_weight * self.criterion(out[1], targets)
+                logits.append(y.detach())
+            logits = torch.stack(logits)
 
             loss /= len(models)
             if loss_predwd is not None:
                 loss += loss_predwd
-            check_loss(loss)
+            if torch.isnan(loss):
+                net_args = None if graphs is None else graphs.net_args
+                raise RuntimeError(
+                    f"NaN loss occurred at rank {self.rank}. "
+                    if self.ddp
+                    else "" + "Unable to proceed since the loss is nan. You may restart the same script with the saved "
+                    f"checkpoint through --ckpt argument. (net_args={net_args})"
+                )
+
+            losses = ddp_aggregate(loss)
+            if any(torch.isnan(l) for l in losses):  # noqa: E741
+                exit(1)
 
             if self._step == 0 and self.ddp:
                 if graphs is None:
@@ -405,19 +401,6 @@ class Trainer:
                 self.metrics["loss_predwd"].update(loss_predwd.cpu(), num_samples)
 
             self._step += 1
-
-        except RuntimeError as error:
-            loss = torch.tensor(torch.nan, device=self.rank)
-            print(
-                f"Error occurred at rank {self.rank}: {type(error)} {error}",
-                graphs.net_args if graphs is not None else "",
-            )
-            print(traceback.format_exc())
-            print(traceback.print_exc())
-            if not self.ddp:
-                raise
-
-        check_loss(loss)
         return self.metrics
 
     def save(self, epoch, step, config, save_freq=300, interm_epoch=5):
