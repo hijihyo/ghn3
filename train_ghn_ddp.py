@@ -140,6 +140,8 @@ def main():
         default=None,
         help="Short description about the experiment. Recorded in Weights & Biases",
     )
+    parser.add_argument("--wandb_resume", type=str, default=None, help="Set the resuming behavior")
+    parser.add_argument("--wandb_id", type=str, default=None, help="A unique ID for this run, used for resuming")
 
     ghn2 = parser.parse_known_args()[0].ghn2
 
@@ -173,12 +175,16 @@ def main():
         del vars_args["wandb_entity"]
         del vars_args["wandb_name"]
         del vars_args["wandb_notes"]
+        del vars_args["wandb_resume"]
+        del vars_args["wandb_id"]
         wandb.init(
             config=vars_args,
             project=args.wandb_project,
             entity=args.wandb_entity,
             name=args.wandb_name,
             notes=args.wandb_notes,
+            resume=args.wandb_resume,
+            id=args.wandb_id,
         )
 
     is_imagenet = args.dataset.startswith("imagenet")
