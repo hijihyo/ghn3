@@ -143,6 +143,8 @@ def main():
     parser.add_argument("--wandb_resume", type=str, default=None, help="Set the resuming behavior")
     parser.add_argument("--wandb_id", type=str, default=None, help="A unique ID for this run, used for resuming")
 
+    parser.add_argument("--ve_cutoff", type=int, default=50, help="A cutoff value for virtual edges")
+
     ghn2 = parser.parse_known_args()[0].ghn2
 
     ddp = setup_ddp()
@@ -216,6 +218,7 @@ def main():
         "decoder": args.decoder,
         "weight_norm": args.weight_norm,
         "ve": args.virtual_edges > 1,
+        "ve_cutoff": args.ve_cutoff,
         "layernorm": args.ln,
         "hid": hid,
         "layers": args.layers,
@@ -235,6 +238,7 @@ def main():
         large_images=is_imagenet,
         verbose=ddp.rank == 0,
         debug=args.debug > 0,
+        ve_cutoff=args.ve_cutoff,
     )
 
     trainer = Trainer(

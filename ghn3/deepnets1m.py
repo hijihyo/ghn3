@@ -32,7 +32,7 @@ class DeepNets1MDDP(DeepNets1M):
     DeepNets1M loader supporting DDP.
     """
 
-    def __init__(self, dense=True, wider_nets=True, debug=False, **kwargs):
+    def __init__(self, dense=True, wider_nets=True, debug=False, ve_cutoff=50, **kwargs):
         if "nets_dir" in kwargs and kwargs["nets_dir"] != "./data":
             # Reset to a local ./data folder if hdf5 is not found in nets_dir (handles some complicated cluster setups)
             nets_dir = kwargs["nets_dir"]
@@ -47,6 +47,7 @@ class DeepNets1MDDP(DeepNets1M):
         self.wider_nets = wider_nets
         self.dense = dense
         self.debug = debug
+        self.ve_cutoff = ve_cutoff
 
         if self.split != "predefined":
             # Improve efficiency of reading metadata so that __getitem__ is faster
@@ -289,7 +290,9 @@ class DeepNets1MDDP(DeepNets1M):
         A = torch.tensor(A, dtype=torch.long)
         A[A > self.virtual_edges] = 0
 
-        graph = Graph(node_feat=node_feat, node_info=node_info, A=A, dense=self.dense, net_args=net_args)
+        graph = Graph(
+            node_feat=node_feat, node_info=node_info, A=A, dense=self.dense, net_args=net_args, ve_cutoff=self.ve_cutoff
+        )
         graph._param_shapes = param_shapes
 
         return graph

@@ -141,11 +141,14 @@ class GHN3(GHN):
     But most of the functions are overridden to support GHN-3 and improve code.
     """
 
-    def __init__(self, max_shape, num_classes, hid, heads=8, layers=3, is_ghn2=False, pretrained=False, **kwargs):
+    def __init__(
+        self, max_shape, num_classes, hid, heads=8, layers=3, is_ghn2=False, pretrained=False, ve_cutoff=50, **kwargs
+    ):
         act_layer = kwargs.pop("act_layer", nn.GELU)
         super().__init__(max_shape, num_classes, hid=hid, **kwargs)
 
         self._is_ghn2 = is_ghn2
+        self.ve_cutoff = ve_cutoff
         if not self._is_ghn2:
             self.gnn = SequentialMultipleInOut(
                 *[
@@ -223,7 +226,7 @@ class GHN3(GHN):
 
         if graphs is None:
             graphs = GraphBatch(
-                [Graph(net, ve_cutoff=50 if self.ve else 1) for net in nets_torch], dense=self.is_dense()
+                [Graph(net, ve_cutoff=self.ve_cutoff if self.ve else 1) for net in nets_torch], dense=self.is_dense()
             ).to_device(device)
         elif isinstance(graphs, Graph) or isinstance(graphs, (list, tuple)):
             graphs = GraphBatch([graphs] if isinstance(graphs, Graph) else graphs, dense=self.is_dense()).to_device(
