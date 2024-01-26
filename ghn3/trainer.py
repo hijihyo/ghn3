@@ -340,10 +340,9 @@ class Trainer:
             if torch.isnan(loss):
                 net_args = None if graphs is None else graphs.net_args
                 raise RuntimeError(
-                    f"NaN loss occurred at rank {self.rank}. "
-                    if self.ddp
-                    else "" + "Unable to proceed since the loss is nan. You may restart the same script with the saved "
-                    f"checkpoint through --ckpt argument. (net_args={net_args})"
+                    (f"NaN loss occurred at rank {self.rank}. " if self.ddp else "") + "Unable to proceed since the "
+                    "loss is nan. You may restart the same script with the saved checkpoint through --ckpt argument. "
+                    f"(net_args={net_args})"
                 )
 
             losses = ddp_aggregate(loss)
